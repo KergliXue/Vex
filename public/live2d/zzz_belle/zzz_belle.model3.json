@@ -1,0 +1,29 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "zzz_belle.moc3",
+		"Textures": [
+			"zzz_belle.8192/texture_00.png",
+			"zzz_belle.8192/texture_01.png",
+			"zzz_belle.8192/texture_02.png",
+			"zzz_belle.8192/texture_03.png"
+		],
+		"Physics": "zzz_belle.physics3.json",
+		"DisplayInfo": "zzz_belle.cdi3.json"
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	]
+}
