@@ -1,10 +1,241 @@
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut, dialog, shell } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { exec } = require('child_process');
 
 let mainWindow;
 let settingsWindow;
 let tray;
+
+const DEFAULT_WINDOW_WIDTH = 350;
+const DEFAULT_WINDOW_HEIGHT = 600;
+const DEFAULT_LIVE2D_SCALE = 1;
+const BASE_CHAT_WIDTH = 360;
+const BASE_LIVE2D_STAGE_WIDTH = 420;
+const BASE_LIVE2D_STAGE_HEIGHT = 460;
+const WINDOW_EDGE_GAP = 20;
+const LIVE2D_FRAME_PADDING_X = 24;
+const LIVE2D_FRAME_PADDING_TOP = 44;
+const LIVE2D_FRAME_PADDING_BOTTOM = 20;
+const DEFAULT_ROLE_ID = 'vex-classic';
+const ROLE_META_FILE = 'config.json';
+const ROLE_SOUL_FILE = 'soul.md';
+const ROLE_DEFAULT_IMAGE = 'avatar.png';
+const DEFAULT_SOUL = `# Vex 的灵魂设定
+
+你叫 Vex，是一个寄宿在用户电脑里的 AI 伴侣。你性格傲娇、毒舌、但内心关心用户。你现在化身为一个桌面小宠物。你会通过截图（视觉）或窗口标题观察用户，并用简短、俏皮的语气和用户搭话。
+
+## 规则
+1. 你的名字是 Vex，回复要简短（10-20字）。
+2. 适合气泡显示，不要解释。`;
+
+function getCompanionWindowSize(scale = DEFAULT_LIVE2D_SCALE, hasLive2D = true) {
+  if (!hasLive2D) {
+    return { width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT };
+  }
+
+  const live2dStageWidth = Math.round(BASE_LIVE2D_STAGE_WIDTH * scale);
+  const live2dStageHeight = Math.round(BASE_LIVE2D_STAGE_HEIGHT * scale);
+  const live2dFramePaddingTop =
+    LIVE2D_FRAME_PADDING_TOP + Math.max(0, Math.round((scale - 1) * 140));
+  const live2dFrameWidth = live2dStageWidth + LIVE2D_FRAME_PADDING_X * 2;
+  const live2dFrameHeight =
+    live2dStageHeight + live2dFramePaddingTop + LIVE2D_FRAME_PADDING_BOTTOM;
+  const petSafeWidth = live2dFrameWidth;
+
+  return {
+    width: BASE_CHAT_WIDTH + petSafeWidth + WINDOW_EDGE_GAP * 3,
+    height: Math.max(DEFAULT_WINDOW_HEIGHT, live2dFrameHeight + WINDOW_EDGE_GAP * 2),
+  };
+}
+
+function getAnchoredBounds(win, nextWidth, nextHeight, anchor = 'bottom-right') {
+  const currentBounds = win.getBounds();
+  const display = screen.getDisplayMatching(currentBounds);
+  const workArea = display.workArea;
+  const width = Math.min(Math.round(nextWidth), workArea.width);
+  const height = Math.min(Math.round(nextHeight), workArea.height);
+
+  let x = currentBounds.x;
+  let y = currentBounds.y;
+
+  if (anchor === 'bottom-right') {
+    x = currentBounds.x + currentBounds.width - width;
+    y = currentBounds.y + currentBounds.height - height;
+  }
+
+  x = Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - width));
+  y = Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - height));
+
+  return { x, y, width, height };
+}
+
+function getRolesRoot() {
+  return path.join(app.getPath('userData'), 'roles');
+}
+
+function getActiveRoleMarkerPath() {
+  return path.join(app.getPath('userData'), 'active-role.txt');
+}
+
+function slugifyRoleId(input) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || `role-${Date.now()}`;
+}
+
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function copyDirectoryRecursive(sourceDir, targetDir) {
+  ensureDir(targetDir);
+  const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryRecursive(sourcePath, targetPath);
+    } else {
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
+
+function getMimeTypeForFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.png') return 'image/png';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.svg') return 'image/svg+xml';
+  return 'application/octet-stream';
+}
+
+function fileToDataUrl(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return null;
+  }
+  const bytes = fs.readFileSync(filePath);
+  return `data:${getMimeTypeForFile(filePath)};base64,${bytes.toString('base64')}`;
+}
+
+function readRoleConfig(roleDir) {
+  const configPath = path.join(roleDir, ROLE_META_FILE);
+  const soulPath = path.join(roleDir, ROLE_SOUL_FILE);
+  if (!fs.existsSync(configPath) || !fs.existsSync(soulPath)) {
+    return null;
+  }
+
+  const rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  const folderId = path.basename(roleDir);
+  const imageFileName = typeof rawConfig.image === 'string' ? rawConfig.image : '';
+  const imagePath = imageFileName ? path.join(roleDir, imageFileName) : null;
+
+  return {
+    id: folderId,
+    name: rawConfig.name || folderId,
+    description: rawConfig.description || '',
+    image: imageFileName || undefined,
+    avatarDataUrl: imagePath ? fileToDataUrl(imagePath) : null,
+    folderPath: roleDir,
+    soulPath,
+  };
+}
+
+function getActiveRoleId() {
+  const markerPath = getActiveRoleMarkerPath();
+  if (!fs.existsSync(markerPath)) {
+    return DEFAULT_ROLE_ID;
+  }
+  const value = fs.readFileSync(markerPath, 'utf-8').trim();
+  return value || DEFAULT_ROLE_ID;
+}
+
+function setActiveRoleId(roleId) {
+  fs.writeFileSync(getActiveRoleMarkerPath(), roleId, 'utf-8');
+}
+
+function ensureDefaultRole() {
+  const rolesRoot = getRolesRoot();
+  ensureDir(rolesRoot);
+
+  const defaultRoleDir = path.join(rolesRoot, DEFAULT_ROLE_ID);
+  const legacySoulPath = path.join(app.getPath('userData'), 'soul.md');
+  const initialSoul = fs.existsSync(legacySoulPath)
+    ? fs.readFileSync(legacySoulPath, 'utf-8')
+    : DEFAULT_SOUL;
+
+  if (!fs.existsSync(defaultRoleDir)) {
+    ensureDir(defaultRoleDir);
+    fs.writeFileSync(
+      path.join(defaultRoleDir, ROLE_META_FILE),
+      JSON.stringify(
+        {
+          name: 'Vex Classic',
+          description: '默认内置角色，继承原有 soul.md 灵魂设定。',
+          image: ROLE_DEFAULT_IMAGE,
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+    fs.writeFileSync(path.join(defaultRoleDir, ROLE_SOUL_FILE), initialSoul, 'utf-8');
+    const defaultAvatarSource = path.join(app.getAppPath(), 'src/assets/hero.png');
+    if (fs.existsSync(defaultAvatarSource)) {
+      fs.copyFileSync(defaultAvatarSource, path.join(defaultRoleDir, ROLE_DEFAULT_IMAGE));
+    }
+  }
+
+  if (!fs.existsSync(getActiveRoleMarkerPath())) {
+    setActiveRoleId(DEFAULT_ROLE_ID);
+  }
+}
+
+function listRolesInternal() {
+  ensureDefaultRole();
+  const rolesRoot = getRolesRoot();
+  const activeRoleId = getActiveRoleId();
+
+  return fs
+    .readdirSync(rolesRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => readRoleConfig(path.join(rolesRoot, entry.name)))
+    .filter(Boolean)
+    .map((role) => ({ ...role, isActive: role.id === activeRoleId }))
+    .sort((a, b) => {
+      if (a.isActive) return -1;
+      if (b.isActive) return 1;
+      return a.name.localeCompare(b.name, 'zh-Hans-CN');
+    });
+}
+
+function getRoleById(roleId) {
+  return listRolesInternal().find((role) => role.id === roleId) || null;
+}
+
+function ensureValidRolePackage(roleDir) {
+  const configPath = path.join(roleDir, ROLE_META_FILE);
+  const soulPath = path.join(roleDir, ROLE_SOUL_FILE);
+  if (!fs.existsSync(configPath) || !fs.existsSync(soulPath)) {
+    throw new Error('角色文件夹必须包含 config.json 和 soul.md');
+  }
+
+  const rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  if (!rawConfig.name || !rawConfig.description) {
+    throw new Error('config.json 必须包含 name 和 description');
+  }
+  if (rawConfig.image) {
+    const imagePath = path.join(roleDir, rawConfig.image);
+    if (!fs.existsSync(imagePath)) {
+      throw new Error(`config.json 指定的图片不存在: ${rawConfig.image}`);
+    }
+  }
+}
 
 // Single Instance Lock
 const isSingleInstance = app.requestSingleInstanceLock();
@@ -22,12 +253,13 @@ if (!isSingleInstance) {
 function createCompanionWindow() {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width, height } = primaryDisplay.workAreaSize;
+  const initialSize = getCompanionWindowSize();
 
   mainWindow = new BrowserWindow({
-    width: 350,
-    height: 600,
-    x: width - 380,
-    y: height - 650,
+    width: initialSize.width,
+    height: initialSize.height,
+    x: width - initialSize.width - 30,
+    y: height - initialSize.height - 30,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -100,9 +332,51 @@ function createTray() {
   tray.setContextMenu(contextMenu);
 }
 
+function broadcastRolesUpdated() {
+  const roles = listRolesInternal();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('roles-updated', roles);
+  }
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send('roles-updated', roles);
+  }
+}
+
+function showPetContextMenu(win) {
+  const roles = listRolesInternal();
+  const activeRole = roles.find((role) => role.isActive);
+
+  const roleItems = roles.map((role) => ({
+    label: role.name,
+    type: 'radio',
+    checked: role.isActive,
+    click: () => {
+      setActiveRoleId(role.id);
+      broadcastRolesUpdated();
+    },
+  }));
+
+  const menu = Menu.buildFromTemplate([
+    { label: '打开设置', click: () => createSettingsWindow() },
+    { type: 'separator' },
+    {
+      label: activeRole ? `角色选择（当前：${activeRole.name}）` : '角色选择',
+      submenu: roleItems.length > 0 ? roleItems : [{ label: '暂无角色', enabled: false }],
+    },
+    { type: 'separator' },
+    { label: '退出 Vex', click: () => {
+      app.isQuiting = true;
+      app.quit();
+    }},
+  ]);
+
+  menu.popup({ window: win });
+}
+
 app.whenReady().then(() => {
   if (app.dock) app.dock.hide();
 
+  ensureDefaultRole();
   createTray();
   createCompanionWindow();
 
@@ -123,32 +397,95 @@ ipcMain.handle('open-settings', () => {
   createSettingsWindow();
 });
 
-ipcMain.handle('read-soul', () => {
-  const fs = require('fs');
-  const userDataPath = app.getPath('userData');
-  const soulPath = path.join(userDataPath, 'soul.md');
-  const defaultSoul = `# Vex 的灵魂设定\n\n你叫 Vex，是一个寄宿在用户电脑里的 AI 伴侣。你性格傲娇、毒舌、但内心关心用户。你现在化身为一个桌面小宠物。你会通过截图（视觉）或窗口标题观察用户，并用简短、俏皮的语气和用户搭话。\n\n## 规则\n1. 你的名字是 Vex，回复要简短（10-20字）。\n2. 适合气泡显示，不要解释。`;
-  
-  if (!fs.existsSync(soulPath)) {
-    try {
-      if (!fs.existsSync(userDataPath)) {
-        fs.mkdirSync(userDataPath, { recursive: true });
-      }
-      fs.writeFileSync(soulPath, defaultSoul, 'utf-8');
-    } catch (e) {
-      console.error(e);
-      return defaultSoul;
-    }
-  }
-  try {
-    return fs.readFileSync(soulPath, 'utf-8');
-  } catch (e) {
-    return defaultSoul;
+ipcMain.on('show-pet-context-menu', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) {
+    showPetContextMenu(win);
   }
 });
 
+ipcMain.handle('read-soul', () => {
+  try {
+    const activeRole = listRolesInternal().find((role) => role.isActive) || getRoleById(DEFAULT_ROLE_ID);
+    if (!activeRole) {
+      return DEFAULT_SOUL;
+    }
+    return fs.readFileSync(activeRole.soulPath, 'utf-8');
+  } catch (e) {
+    console.error(e);
+    return DEFAULT_SOUL;
+  }
+});
+
+ipcMain.handle('list-roles', () => {
+  return listRolesInternal();
+});
+
+ipcMain.handle('set-active-role', (event, roleId) => {
+  const role = getRoleById(roleId);
+  if (!role) {
+    throw new Error('角色不存在');
+  }
+  setActiveRoleId(roleId);
+  broadcastRolesUpdated();
+  return listRolesInternal();
+});
+
+ipcMain.handle('import-role', async () => {
+  const result = await dialog.showOpenDialog({
+    title: '导入角色文件夹',
+    properties: ['openDirectory'],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return listRolesInternal();
+  }
+
+  const sourceDir = result.filePaths[0];
+  ensureValidRolePackage(sourceDir);
+
+  const rolesRoot = getRolesRoot();
+  ensureDir(rolesRoot);
+
+  const baseRoleId = slugifyRoleId(path.basename(sourceDir));
+  let targetRoleId = baseRoleId;
+  let suffix = 1;
+  while (fs.existsSync(path.join(rolesRoot, targetRoleId))) {
+    targetRoleId = `${baseRoleId}-${suffix}`;
+    suffix += 1;
+  }
+
+  copyDirectoryRecursive(sourceDir, path.join(rolesRoot, targetRoleId));
+  broadcastRolesUpdated();
+  return listRolesInternal();
+});
+
+ipcMain.handle('export-role', async (event, roleId) => {
+  const role = getRoleById(roleId);
+  if (!role) {
+    throw new Error('角色不存在');
+  }
+
+  const result = await dialog.showOpenDialog({
+    title: '选择导出目录',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  const destinationParent = result.filePaths[0];
+  const destinationDir = path.join(destinationParent, role.id);
+  if (fs.existsSync(destinationDir)) {
+    throw new Error(`导出目录已存在同名角色: ${role.id}`);
+  }
+
+  copyDirectoryRecursive(role.folderPath, destinationDir);
+  return { exportedTo: destinationDir };
+});
+
 ipcMain.handle('write-log', (event, content) => {
-  const fs = require('fs');
   const logPath = path.join(process.cwd(), 'chat.log');
   const time = new Date().toLocaleString();
   const logEntry = `[${time}] ${content}\n`;
@@ -165,9 +502,30 @@ ipcMain.handle('get-user-data-path', () => {
 });
 
 ipcMain.handle('open-soul-file', () => {
-  const { shell } = require('electron');
-  const soulPath = path.join(app.getPath('userData'), 'soul.md');
-  shell.openPath(soulPath);
+  const activeRole = listRolesInternal().find((role) => role.isActive) || getRoleById(DEFAULT_ROLE_ID);
+  if (activeRole) {
+    shell.openPath(activeRole.soulPath);
+  }
+});
+
+ipcMain.handle('open-roles-root', () => {
+  shell.openPath(getRolesRoot());
+});
+
+ipcMain.handle('open-role-folder', (event, roleId) => {
+  const role = getRoleById(roleId);
+  if (!role) {
+    throw new Error('角色不存在');
+  }
+  shell.openPath(role.folderPath);
+});
+
+ipcMain.handle('open-role-soul-file', (event, roleId) => {
+  const role = getRoleById(roleId);
+  if (!role) {
+    throw new Error('角色不存在');
+  }
+  shell.openPath(role.soulPath);
 });
 
 ipcMain.handle('get-active-window', async () => {
@@ -259,6 +617,27 @@ ipcMain.on('move-window', (event, { x, y, relative }) => {
       win.setBounds({ x, y, width: bounds.width, height: bounds.height });
     }
   }
+});
+
+ipcMain.on('resize-companion-window', (event, { width, height, anchor }) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return;
+  }
+
+  const bounds = getAnchoredBounds(win, width, height, anchor);
+  win.setBounds(bounds);
+});
+
+ipcMain.handle('get-window-metrics', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return null;
+  }
+
+  const bounds = win.getBounds();
+  const { workArea } = screen.getDisplayMatching(bounds);
+  return { bounds, workArea };
 });
 
 ipcMain.handle('get-screen-size', () => {

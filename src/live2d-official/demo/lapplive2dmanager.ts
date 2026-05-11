@@ -19,6 +19,21 @@ import { LAppSubdelegate } from './lappsubdelegate';
  * モデル生成と破棄、タップイベントの処理、モデル切り替えを行う。
  */
 export class LAppLive2DManager {
+  public triggerActionPreset(preset: {
+    durationMs?: number;
+    params?: Record<string, number>;
+  }): void {
+    const model: LAppModel = this._models[0];
+    if (!model || !preset?.params) {
+      return;
+    }
+
+    model.triggerTemporaryParameterOverrides(
+      preset.params,
+      preset.durationMs ?? 2500
+    );
+  }
+
   /**
    * 現在のシーンで保持しているすべてのモデルを解放する
    */

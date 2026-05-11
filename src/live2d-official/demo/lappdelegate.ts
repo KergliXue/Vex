@@ -10,6 +10,7 @@ import * as LAppDefine from './lappdefine';
 import { LAppPal } from './lapppal';
 import { LAppSubdelegate } from './lappsubdelegate';
 import { CubismLogError } from '@framework/utils/cubismdebug';
+import { LAppLive2DManager } from './lapplive2dmanager';
 
 export let s_instance: LAppDelegate = null;
 
@@ -110,6 +111,14 @@ export class LAppDelegate {
       requestAnimationFrame(loop);
     };
     loop();
+  }
+
+  public getLive2DManager(): LAppLive2DManager | null {
+    if (!this._subdelegates || this._subdelegates.length === 0) {
+      return null;
+    }
+
+    return this._subdelegates[0].getLive2DManager();
   }
 
   /**

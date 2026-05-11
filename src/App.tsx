@@ -20,7 +20,11 @@ function App() {
 
   // Use includes to be more resilient to trailing slashes or other variations
   if (route.includes('settings')) {
-    return <Settings />;
+    return (
+      <div className="settings-page">
+        <Settings />
+      </div>
+    );
   }
 
   return <Companion />;

@@ -1,0 +1,42 @@
+{
+  "allowedActions": ["happy", "thinking", "blue_mode", "glasses_on"],
+  "aiInstructions": [
+    "优先返回 JSON，对象结构必须是 {\"text\":\"回复内容\",\"live2d\":{\"action\":\"动作名\"}}。",
+    "如果不需要动作，也要返回 JSON，例如 {\"text\":\"回复内容\"}。",
+    "动作名只能从以下列表中选择：happy, thinking, blue_mode, glasses_on。",
+    "不要输出 markdown 解释，不要在 text 里重复动作名。"
+  ],
+  "actions": {
+    "happy": {
+      "durationMs": 2600,
+      "params": {
+        "ParamMouthForm": 1.1,
+        "Param19": 0.45,
+        "ParamMouthOpenY": 0.2,
+        "ParamBrowLAngle2": -0.15
+      }
+    },
+    "thinking": {
+      "durationMs": 2600,
+      "params": {
+        "ParamAngleX": -10,
+        "ParamAngleZ": 5,
+        "ParamEyeBallX": -0.45,
+        "ParamMouthForm": -0.2,
+        "ParamMouthOpenY": 0.05
+      }
+    },
+    "blue_mode": {
+      "durationMs": 3200,
+      "params": {
+        "Param122": 20
+      }
+    },
+    "glasses_on": {
+      "durationMs": 3200,
+      "params": {
+        "Param123": 1
+      }
+    }
+  }
+}

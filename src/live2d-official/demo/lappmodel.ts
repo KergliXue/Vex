@@ -83,6 +83,9 @@ enum LoadStep {
  * モデル生成、機能コンポーネント生成、更新処理とレンダリングの呼び出しを行う。
  */
 export class LAppModel extends CubismUserModel {
+  private _temporaryParameterOverrides: Record<string, number>;
+  private _temporaryParameterOverridesUntil: number;
+
   /**
    * model3.jsonが置かれたディレクトリとファイルパスからモデルを生成する
    * @param dir
@@ -621,7 +624,27 @@ export class LAppModel extends CubismUserModel {
     // UpdateSchedulerによる一括エフェクト更新
     this._updateScheduler.onLateUpdate(this._model, deltaTimeSeconds);
 
+    if (
+      this._temporaryParameterOverrides &&
+      Date.now() < this._temporaryParameterOverridesUntil
+    ) {
+      Object.entries(this._temporaryParameterOverrides).forEach(([id, value]) => {
+        this._model.setParameterValueById(
+          CubismFramework.getIdManager().getId(id),
+          value
+        );
+      });
+    }
+
     this._model.update();
+  }
+
+  public triggerTemporaryParameterOverrides(
+    overrides: Record<string, number>,
+    durationMs: number
+  ): void {
+    this._temporaryParameterOverrides = overrides;
+    this._temporaryParameterOverridesUntil = Date.now() + durationMs;
   }
 
   /**
@@ -1039,6 +1062,8 @@ export class LAppModel extends CubismUserModel {
     this._look = null;
     this._updateScheduler = new CubismUpdateScheduler();
     this._motionUpdated = false;
+    this._temporaryParameterOverrides = {};
+    this._temporaryParameterOverridesUntil = 0;
   }
 
   private _updateScheduler: CubismUpdateScheduler; // アップデートスケジューラー
