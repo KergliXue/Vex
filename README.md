@@ -60,7 +60,43 @@ npm run dev
 npm run build
 ```
 
-### 4. 代码检查
+### 4. 打包桌面应用
+
+项目已经接入 `electron-builder`，默认打包输出目录为 [release](/Users/kerglixue/dev/Code/vex/release)。
+
+先执行基础构建：
+
+```bash
+npm install
+npm run build
+```
+
+然后按平台打包：
+
+```bash
+# 通用打包
+npm run dist
+
+# macOS 安装包 / 压缩包
+npm run dist:mac
+
+# Windows 安装包 / 压缩包
+npm run dist:win
+
+# 只生成未封装目录，便于本地检查
+npm run dist:dir
+```
+
+默认会产出：
+
+- macOS:
+  - `dmg`
+  - `zip`
+- Windows:
+  - `nsis` 安装包 `.exe`
+  - `zip`
+
+### 5. 代码检查
 
 ```bash
 npm run lint
@@ -125,12 +161,32 @@ vex/
 
 如果要支持 Windows 或 Linux，需要额外实现对应的平台层能力。
 
+不过打包层已经预留好了 `macOS / Windows` 两套分发命令。需要注意的是：
+
+- `npm run dist:mac` 最适合在 `macOS` 上执行
+- `npm run dist:win` 最稳妥的方式是在 `Windows` 机器上执行
+- 虽然 `electron-builder` 某些目标支持跨平台构建，但真正给别人分发时，仍建议在目标系统本机上打包
+
+如果你只是要先给别人测试：
+
+- macOS 可以直接给 `dmg` 或 `zip`
+- Windows 可以直接给 `Vex-Setup-版本号.exe`
+- 也可以给未封装目录产物做绿色版测试
+
+## 发布说明
+
+当前打包配置已经能生成可分发产物，但还没有接入正式签名：
+
+- macOS 未做 Apple Developer 签名 / notarization
+- Windows 未做代码签名
+
+所以别人第一次打开时，系统可能会出现安全提示。这对测试版分发是正常的。
+
 ## 当前状态
 
 这是一个已经跑起来的 AI 桌宠实验项目，但仍有一些明显的工程化缺口：
 
-- 暂无完整发布流程
-- 缺少正式打包与安装说明
+- 缺少签名与自动发布流程
 - 缺少自动化测试
 - 权限、稳定性和异常处理仍可继续加强
 

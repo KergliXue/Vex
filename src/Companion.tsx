@@ -8,6 +8,15 @@ interface Message {
   content: string;
 }
 
+interface ChatThread {
+  id: string;
+  title: string;
+  messages: Message[];
+  mode: 'normal' | 'story';
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface Live2DActionEvent {
   name: string;
   nonce: number;
@@ -42,6 +51,10 @@ const DEFAULT_CHAT_PANEL_WIDTH = 360
 const DEFAULT_CHAT_PANEL_HEIGHT = 520
 const CHAT_PANEL_MIN_WIDTH = 180
 const CHAT_PANEL_MIN_HEIGHT = 180
+const WORKSPACE_PREVIEW_OFFSET_X_KEY = 'workspace_live2d_preview_offset_x'
+const WORKSPACE_PREVIEW_OFFSET_Y_KEY = 'workspace_live2d_preview_offset_y'
+const WORKSPACE_PREVIEW_SCALE_KEY = 'workspace_live2d_preview_scale'
+const WORKSPACE_PREVIEW_FRAME_SIZE = 240
 const DEFAULT_ACTION_CONFIG: Live2DActionConfig = {
   allowedActions: ['happy', 'thinking', 'blue_mode', 'glasses_on'],
   aiInstructions: [
@@ -51,6 +64,8 @@ const DEFAULT_ACTION_CONFIG: Live2DActionConfig = {
     'text 里不要再包含动作标签、JSON 解释或额外说明。'
   ]
 }
+const CHAT_THREADS_STORAGE_KEY = 'chat_threads'
+const ACTIVE_THREAD_STORAGE_KEY = 'active_chat_thread_id'
 
 function getActionConfigPath(modelPath: string) {
   const lastSlashIndex = modelPath.lastIndexOf('/')
@@ -58,6 +73,71 @@ function getActionConfigPath(modelPath: string) {
     return '/live2d/zzz_belle/actions.json'
   }
   return `${modelPath.slice(0, lastSlashIndex + 1)}actions.json`
+}
+
+function createThreadTitle(timestamp: number) {
+  return `新对话 ${new Date(timestamp).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`
+}
+
+function createNewThread(mode: 'normal' | 'story' = 'normal'): ChatThread {
+  const now = Date.now()
+  return {
+    id: `thread-${now}`,
+    title: createThreadTitle(now),
+    messages: [],
+    mode,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function loadInitialThreads(): { threads: ChatThread[]; activeThreadId: string } {
+  const savedThreads = localStorage.getItem(CHAT_THREADS_STORAGE_KEY)
+  const savedActiveThreadId = localStorage.getItem(ACTIVE_THREAD_STORAGE_KEY)
+
+  if (savedThreads) {
+    try {
+      const parsed = JSON.parse(savedThreads) as ChatThread[]
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const threads = parsed.filter(thread => thread && thread.id && Array.isArray(thread.messages))
+        const fallbackThread = threads[0]
+        return {
+          threads,
+          activeThreadId:
+            threads.some(thread => thread.id === savedActiveThreadId) && savedActiveThreadId
+              ? savedActiveThreadId
+              : fallbackThread.id,
+        }
+      }
+    } catch {
+      // Ignore invalid persisted threads and fall back to migration below.
+    }
+  }
+
+  const legacyHistory = localStorage.getItem('chat_history')
+  if (legacyHistory) {
+    try {
+      const parsedMessages = JSON.parse(legacyHistory) as Message[]
+      const migratedThread = createNewThread('normal')
+      migratedThread.messages = Array.isArray(parsedMessages) ? parsedMessages : []
+      migratedThread.updatedAt = Date.now()
+      return {
+        threads: [migratedThread],
+        activeThreadId: migratedThread.id,
+      }
+    } catch {
+      // Ignore invalid legacy history.
+    }
+  }
+
+  const initialThread = createNewThread('normal')
+  return {
+    threads: [initialThread],
+    activeThreadId: initialThread.id,
+  }
 }
 
 function getChatPanelRect(
@@ -140,15 +220,19 @@ function getCompanionLayout(modelPath: string, scale: number) {
   }
 }
 
-function Companion() {
+interface CompanionProps {
+  mode?: 'pet' | 'workspace'
+}
+
+function Companion({ mode = 'pet' }: CompanionProps) {
+  const isWorkspaceMode = mode === 'workspace'
+  const initialThreadsState = loadInitialThreads()
   const [activeApp, setActiveApp] = useState('Unknown')
   const [activeTitle, setActiveTitle] = useState('Unknown')
   const [activeContext, setActiveContext] = useState('')
-  const [messages, setMessages] = useState<Message[]>(() => {
-    const saved = localStorage.getItem('chat_history')
-    return saved ? JSON.parse(saved) : []
-  })
-  const [isChatOpen, setIsChatOpen] = useState(false)
+  const [threads, setThreads] = useState<ChatThread[]>(initialThreadsState.threads)
+  const [activeThreadId, setActiveThreadId] = useState(initialThreadsState.activeThreadId)
+  const [isChatOpen, setIsChatOpen] = useState(isWorkspaceMode)
   const [inputText, setInputText] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [recentAutoMessage, setRecentAutoMessage] = useState('')
@@ -169,7 +253,13 @@ function Companion() {
   })
   const [live2dAction, setLive2dAction] = useState<Live2DActionEvent | null>(null)
   const [actionConfig, setActionConfig] = useState<Live2DActionConfig>(DEFAULT_ACTION_CONFIG)
+  const [workspacePreviewOffsetX, setWorkspacePreviewOffsetX] = useState(() => parseInt(localStorage.getItem(WORKSPACE_PREVIEW_OFFSET_X_KEY) || '0', 10))
+  const [workspacePreviewOffsetY, setWorkspacePreviewOffsetY] = useState(() => parseInt(localStorage.getItem(WORKSPACE_PREVIEW_OFFSET_Y_KEY) || '0', 10))
+  const [workspacePreviewScale, setWorkspacePreviewScale] = useState(() => parseFloat(localStorage.getItem(WORKSPACE_PREVIEW_SCALE_KEY) || '1'))
   const layout = getCompanionLayout(live2dModelPath, live2dScale)
+  const activeThread = threads.find(thread => thread.id === activeThreadId) || threads[0]
+  const sortedThreads = [...threads].sort((a, b) => b.updatedAt - a.updatedAt)
+  const messages = activeThread?.messages || []
 
   // Organic state tracking
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -177,6 +267,7 @@ function Companion() {
   const switchHistoryRef = useRef<number[]>([])
   const lastSpokeTimeRef = useRef(0)
   const lastSwitchTimeRef = useRef(0)
+  const workspacePreviewDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null)
 
   // Load config
   const getConfig = () => {
@@ -190,6 +281,85 @@ function Companion() {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
+
+  const updateActiveThread = (updater: (thread: ChatThread) => ChatThread) => {
+    setThreads(prev => prev.map(thread => (
+      thread.id === activeThreadId
+        ? updater(thread)
+        : thread
+    )))
+  }
+
+  const appendMessageToActiveThread = (message: Message) => {
+    updateActiveThread((thread) => {
+      const nextMessages = [...thread.messages, message]
+      const nextTitle =
+        thread.title.startsWith('新对话') && message.role === 'user'
+          ? message.content.slice(0, 16) || thread.title
+          : thread.title
+
+      return {
+        ...thread,
+        title: nextTitle,
+        messages: nextMessages,
+        updatedAt: Date.now(),
+      }
+    })
+  }
+
+  const createAndSwitchThread = () => {
+    const nextThread = createNewThread('normal')
+    setThreads(prev => [nextThread, ...prev])
+    setActiveThreadId(nextThread.id)
+    setInputText('')
+    setShowAutoMessage(false)
+    setIsChatOpen(true)
+  }
+
+  const clearActiveThread = () => {
+    updateActiveThread((thread) => ({
+      ...thread,
+      title: createThreadTitle(Date.now()),
+      messages: [],
+      updatedAt: Date.now(),
+    }))
+    setInputText('')
+  }
+
+  const renameActiveThread = () => {
+    if (!activeThread) return
+    const nextTitle = window.prompt('给这个对话线程起个名字：', activeThread.title)?.trim()
+    if (!nextTitle) return
+
+    updateActiveThread((thread) => ({
+      ...thread,
+      title: nextTitle,
+      updatedAt: Date.now(),
+    }))
+  }
+
+  const deleteActiveThread = () => {
+    if (!activeThread) return
+    if (!window.confirm(`确定删除对话线程「${activeThread.title}」吗？`)) {
+      return
+    }
+
+    if (threads.length === 1) {
+      const replacementThread = createNewThread(activeThread.mode)
+      setThreads([replacementThread])
+      setActiveThreadId(replacementThread.id)
+    } else {
+      const remainingThreads = threads.filter(thread => thread.id !== activeThread.id)
+      const fallbackThread = [...remainingThreads].sort((a, b) => b.updatedAt - a.updatedAt)[0]
+      setThreads(remainingThreads)
+      if (fallbackThread) {
+        setActiveThreadId(fallbackThread.id)
+      }
+    }
+
+    setInputText('')
+    setShowAutoMessage(false)
   }
 
   const actionPrompt = `\n\n【输出格式规则】\n${(actionConfig.aiInstructions || DEFAULT_ACTION_CONFIG.aiInstructions || []).join('\n')}\n如果你没法严格返回 JSON，才允许退化为普通文本，或者在末尾附加旧格式标签 [action:动作名]。`
@@ -251,8 +421,37 @@ function Companion() {
   }, [messages, isChatOpen])
 
   useEffect(() => {
-    localStorage.setItem('chat_history', JSON.stringify(messages))
-  }, [messages])
+    localStorage.setItem(WORKSPACE_PREVIEW_OFFSET_X_KEY, String(workspacePreviewOffsetX))
+    localStorage.setItem(WORKSPACE_PREVIEW_OFFSET_Y_KEY, String(workspacePreviewOffsetY))
+  }, [workspacePreviewOffsetX, workspacePreviewOffsetY])
+
+  useEffect(() => {
+    localStorage.setItem(WORKSPACE_PREVIEW_SCALE_KEY, String(workspacePreviewScale))
+  }, [workspacePreviewScale])
+
+  useEffect(() => {
+    if (isWorkspaceMode) {
+      setIsChatOpen(true)
+    }
+  }, [isWorkspaceMode])
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_THREADS_STORAGE_KEY, JSON.stringify(threads))
+    localStorage.setItem(ACTIVE_THREAD_STORAGE_KEY, activeThreadId)
+  }, [activeThreadId, threads])
+
+  useEffect(() => {
+    if (!threads.length) {
+      const fallbackThread = createNewThread('normal')
+      setThreads([fallbackThread])
+      setActiveThreadId(fallbackThread.id)
+      return
+    }
+
+    if (!threads.some(thread => thread.id === activeThreadId)) {
+      setActiveThreadId(threads[0].id)
+    }
+  }, [activeThreadId, threads])
 
   useEffect(() => {
     let cancelled = false
@@ -310,12 +509,16 @@ function Companion() {
     const electronAPI = window.electronAPI
     if (!electronAPI) return
 
+    if (isWorkspaceMode) {
+      return
+    }
+
     electronAPI.resizeCompanionWindow({
       width: layout.windowWidth,
       height: layout.windowHeight,
-      anchor: 'bottom-right',
+      anchor: 'top-left',
     })
-  }, [layout.windowHeight, layout.windowWidth])
+  }, [isWorkspaceMode, layout.windowHeight, layout.windowWidth])
 
   // Polling active window (just to update state)
   useEffect(() => {
@@ -524,16 +727,16 @@ function Companion() {
       setRecentAutoMessage(parsed.text);
       setShowAutoMessage(true);
       setTimeout(() => setShowAutoMessage(false), 8000);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: parsed.text }]);
+      appendMessageToActiveThread({ id: Date.now().toString(), role: 'assistant', content: parsed.text });
     } else {
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: parsed.text }]);
+      appendMessageToActiveThread({ id: Date.now().toString(), role: 'assistant', content: parsed.text });
     }
   };
 
   // Organic Intelligence Loop
   useEffect(() => {
     const organicCheck = setInterval(() => {
-      if (activeApp === 'Unknown' || isTyping || isChatOpen) return;
+      if (isWorkspaceMode || activeApp === 'Unknown' || isTyping || isChatOpen) return;
 
       const now = Date.now();
       const silenceDuration = now - lastSpokeTimeRef.current;
@@ -566,7 +769,7 @@ function Companion() {
     }, 10000); // Check every 10 seconds
 
     return () => clearInterval(organicCheck);
-  }, [activeApp, activeTitle, isTyping, isChatOpen]);
+  }, [activeApp, activeTitle, isTyping, isChatOpen, isWorkspaceMode]);
 
   const handleSend = () => {
     const content = inputText.trim();
@@ -576,8 +779,7 @@ function Companion() {
     if (content.startsWith('/')) {
       const cmd = content.toLowerCase().split(' ')[0];
       if (cmd === '/clear') {
-        setMessages([]);
-        setInputText('');
+        clearActiveThread()
         if (window.electronAPI) window.electronAPI.writeLog("🧹 Chat cleared by command.");
         return;
       }
@@ -588,17 +790,11 @@ function Companion() {
             name: actionName,
             nonce: Date.now(),
           });
-          setMessages(prev => [
-            ...prev,
-            { id: Date.now().toString(), role: 'user', content: `/action ${actionName}` },
-            { id: `action-${Date.now()}`, role: 'assistant', content: `已触发动作：${actionName}` }
-          ]);
+          appendMessageToActiveThread({ id: Date.now().toString(), role: 'user', content: `/action ${actionName}` });
+          appendMessageToActiveThread({ id: `action-${Date.now()}`, role: 'assistant', content: `已触发动作：${actionName}` });
         } else {
-          setMessages(prev => [
-            ...prev,
-            { id: Date.now().toString(), role: 'user', content: '/action' },
-            { id: `action-help-${Date.now()}`, role: 'assistant', content: `用法：/action ${actionConfig.allowedActions.join('|')}` }
-          ]);
+          appendMessageToActiveThread({ id: Date.now().toString(), role: 'user', content: '/action' });
+          appendMessageToActiveThread({ id: `action-help-${Date.now()}`, role: 'assistant', content: `用法：/action ${actionConfig.allowedActions.join('|')}` });
         }
         setInputText('');
         return;
@@ -609,14 +805,15 @@ function Companion() {
           role: 'assistant', 
           content: `【可用指令】\n/clear - 清空屏幕上的聊天记录\n/action 动作名 - 手动触发 Live2D 动作（当前支持：${actionConfig.allowedActions.join(', ')}）\n/help - 查看此帮助` 
         };
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: '/help' }, helpMsg]);
+        appendMessageToActiveThread({ id: Date.now().toString(), role: 'user', content: '/help' });
+        appendMessageToActiveThread(helpMsg);
         setInputText('');
         return;
       }
     }
 
     const newMsg: Message = { id: Date.now().toString(), role: 'user', content };
-    setMessages(prev => [...prev, newMsg]);
+    appendMessageToActiveThread(newMsg);
     setInputText('');
     setShowAutoMessage(false);
 
@@ -739,6 +936,11 @@ function Companion() {
     const eAPI = window.electronAPI;
     if (!eAPI) return;
 
+    if (isWorkspaceMode) {
+      eAPI.setIgnoreMouseEvents(false);
+      return;
+    }
+
     eAPI.setIgnoreMouseEvents(true, { forward: true });
 
     const onMouseMove = (e: MouseEvent) => {
@@ -758,11 +960,16 @@ function Companion() {
     return () => {
       document.removeEventListener('mousemove', onMouseMove);
     };
-  }, []);
+  }, [isWorkspaceMode]);
 
   useEffect(() => {
     const eAPI = window.electronAPI;
     if (!eAPI) return;
+
+    if (isWorkspaceMode) {
+      eAPI.setIgnoreMouseEvents(false);
+      return;
+    }
 
     if (isChatOpen) {
       eAPI.setIgnoreMouseEvents(false);
@@ -770,12 +977,12 @@ function Companion() {
     }
 
     eAPI.setIgnoreMouseEvents(true, { forward: true });
-  }, [isChatOpen]);
+  }, [isChatOpen, isWorkspaceMode]);
 
   useEffect(() => {
     const syncChatPanelRect = () => {
       const electronAPI = window.electronAPI
-      if (!electronAPI || !isChatOpen) {
+      if (isWorkspaceMode || !electronAPI || !isChatOpen) {
         setChatPanelRect({
           left: CHAT_PANEL_MARGIN,
           top: CHAT_PANEL_MARGIN,
@@ -805,7 +1012,220 @@ function Companion() {
     void syncChatPanelRect()
     window.addEventListener('vex-sync-chat-viewport', syncChatPanelRect)
     return () => window.removeEventListener('vex-sync-chat-viewport', syncChatPanelRect)
-  }, [chatOffsetX, chatOffsetY, chatPanelHeight, chatPanelWidth, isChatOpen, layout.petSafeWidth, layout.windowHeight, layout.windowWidth])
+  }, [chatOffsetX, chatOffsetY, chatPanelHeight, chatPanelWidth, isChatOpen, isWorkspaceMode, layout.petSafeWidth, layout.windowHeight, layout.windowWidth])
+
+  const workspaceLive2dScale = Math.min(2.4, Math.max(0.45, workspacePreviewScale))
+  const workspaceCanvasZoom = Math.max(1, workspaceLive2dScale)
+  const workspacePreviewFrameSize = WORKSPACE_PREVIEW_FRAME_SIZE
+  const workspaceLive2dWidth = Math.round((workspacePreviewFrameSize + 120) * workspaceCanvasZoom)
+  const workspaceLive2dHeight = Math.round((workspacePreviewFrameSize + 180) * workspaceCanvasZoom)
+
+  const beginWorkspacePreviewDrag = (e: React.MouseEvent) => {
+    e.preventDefault()
+    workspacePreviewDragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: workspacePreviewOffsetX,
+      originY: workspacePreviewOffsetY,
+    }
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const drag = workspacePreviewDragRef.current
+      if (!drag) return
+      setWorkspacePreviewOffsetX(drag.originX + (moveEvent.clientX - drag.startX))
+      setWorkspacePreviewOffsetY(drag.originY + (moveEvent.clientY - drag.startY))
+    }
+
+    const handleUp = () => {
+      workspacePreviewDragRef.current = null
+      window.removeEventListener('mousemove', handleMove)
+      window.removeEventListener('mouseup', handleUp)
+    }
+
+    window.addEventListener('mousemove', handleMove)
+    window.addEventListener('mouseup', handleUp)
+  }
+
+  const handleWorkspacePreviewWheel = (e: React.WheelEvent) => {
+    e.preventDefault()
+    const direction = e.deltaY > 0 ? -0.08 : 0.08
+    setWorkspacePreviewScale((prev) => Number(Math.min(2.4, Math.max(0.45, prev + direction)).toFixed(2)))
+  }
+
+  if (isWorkspaceMode) {
+    return (
+      <div className="workspace-page">
+        <aside className="workspace-left-column">
+          <div className="workspace-thread-panel">
+            <div className="workspace-sidebar-header">
+              <div>
+                <p className="workspace-eyebrow">Vex Chat</p>
+                <h2>对话线程</h2>
+              </div>
+              <button type="button" className="workspace-primary-btn" onClick={createAndSwitchThread}>
+                + 新对话
+              </button>
+            </div>
+
+            <div className="workspace-thread-list">
+              {sortedThreads.map((thread) => {
+                const lastMessage = thread.messages[thread.messages.length - 1]?.content || '还没有消息'
+                return (
+                  <button
+                    key={thread.id}
+                    type="button"
+                    className={`workspace-thread-item ${thread.id === activeThread?.id ? 'active' : ''}`}
+                    onClick={() => setActiveThreadId(thread.id)}
+                  >
+                    <div className="workspace-thread-item-top">
+                      <span className="workspace-thread-name">{thread.title}</span>
+                      <span className="workspace-thread-badge">{thread.messages.length}</span>
+                    </div>
+                    <div className="workspace-thread-preview">{lastMessage}</div>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="workspace-sidebar-footer">
+              <button
+                type="button"
+                className="workspace-gear-btn"
+                aria-label="打开设置"
+                onClick={() => void window.electronAPI?.openSettings()}
+              >
+                ⚙
+              </button>
+            </div>
+          </div>
+
+          <div className="workspace-preview-panel">
+            <div className="workspace-preview-shell">
+              <div
+                className="workspace-preview-frame"
+                style={{ width: `${workspacePreviewFrameSize}px`, height: `${workspacePreviewFrameSize}px` }}
+                onWheel={handleWorkspacePreviewWheel}
+              >
+                <button
+                  type="button"
+                  className="workspace-preview-reset"
+                  onClick={() => {
+                    setWorkspacePreviewOffsetX(0)
+                    setWorkspacePreviewOffsetY(0)
+                    setWorkspacePreviewScale(1)
+                  }}
+                >
+                  重置
+                </button>
+                <div className="workspace-preview-stage" onMouseDown={beginWorkspacePreviewDrag}>
+                  <div
+                    className="workspace-preview-model"
+                    style={{
+                      width: `${workspaceLive2dWidth}px`,
+                      height: `${workspaceLive2dHeight}px`,
+                      transform: `translate(${workspacePreviewOffsetX}px, ${workspacePreviewOffsetY}px)`,
+                    }}
+                  >
+                    {live2dModelPath ? (
+                      <Live2DCanvas
+                        modelPath={live2dModelPath}
+                        scale={workspaceLive2dScale}
+                        width={workspaceLive2dWidth}
+                        height={workspaceLive2dHeight}
+                        offsetX={0}
+                        topPadding={0}
+                        inline
+                        action={live2dAction}
+                      />
+                    ) : (
+                      <div className="pet-face">🤖</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <main className="workspace-main">
+          <div className="workspace-main-header">
+            <div>
+              <h1>{activeThread?.title || '未命名线程'}</h1>
+            </div>
+            <div className="workspace-header-actions">
+              <button
+                type="button"
+                className="workspace-secondary-btn"
+                onClick={() => void window.electronAPI?.openCompanionHome()}
+              >
+                返回桌宠
+              </button>
+            </div>
+          </div>
+
+          <div className="workspace-content">
+            <section className="workspace-chat-card">
+              <div className="workspace-thread-manager">
+                <div>
+                  <div className="thread-manager-label">当前线程管理</div>
+                  <div className="thread-manager-title">{activeThread?.title || '未命名线程'}</div>
+                </div>
+                <div className="thread-manager-actions">
+                  <button type="button" className="thread-manage-btn" onClick={renameActiveThread}>
+                    改名
+                  </button>
+                  <button type="button" className="thread-manage-btn" onClick={clearActiveThread}>
+                    清空当前
+                  </button>
+                  <button type="button" className="thread-manage-btn danger" onClick={deleteActiveThread}>
+                    删除线程
+                  </button>
+                </div>
+              </div>
+
+              <div className="workspace-chat-messages">
+                {messages.length === 0 && (
+                  <div className="empty-state">
+                    {activeThread?.title || '新对话'} 还没有内容，和我打个招呼吧~
+                  </div>
+                )}
+                {messages.map(msg => (
+                  <div key={msg.id} className={`message-row ${msg.role}`}>
+                    <div className={`message-bubble ${msg.role}`}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))}
+                {isTyping && (
+                  <div className="message-row assistant">
+                    <div className="message-bubble assistant typing">
+                      <span className="dot"></span>
+                      <span className="dot"></span>
+                      <span className="dot"></span>
+                    </div>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              <div className="workspace-chat-input">
+                <textarea
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="在这里继续这个线程的对话..."
+                  rows={3}
+                />
+                <button onClick={handleSend} disabled={!inputText.trim() || isTyping}>
+                  发送
+                </button>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -831,7 +1251,9 @@ function Companion() {
         >
           <div className="chat-messages">
             {messages.length === 0 && (
-              <div className="empty-state">和我打个招呼吧~</div>
+              <div className="empty-state">
+                {activeThread?.title || '新对话'} 还没有内容，和我打个招呼吧~
+              </div>
             )}
             {messages.map(msg => (
               <div key={msg.id} className={`message-row ${msg.role}`}>

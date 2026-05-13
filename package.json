@@ -6,8 +6,42 @@
   "scripts": {
     "dev": "concurrently \"vite --port 5174\" \"wait-on tcp:5174 && cross-env NODE_ENV=development electron .\"",
     "build": "tsc -b && vite build",
+    "dist": "npm run build && electron-builder",
+    "dist:dir": "npm run build && electron-builder --dir",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip",
+    "dist:win": "npm run build && electron-builder --win nsis zip",
     "lint": "eslint .",
     "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.kergli.vex",
+    "productName": "Vex",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    }
   },
   "dependencies": {
     "pixi-live2d-display": "^0.4.0",

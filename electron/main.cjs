@@ -5,6 +5,7 @@ const { exec } = require('child_process');
 
 let mainWindow;
 let settingsWindow;
+let chatWindow;
 let tray;
 
 const DEFAULT_WINDOW_WIDTH = 350;
@@ -21,6 +22,7 @@ const DEFAULT_ROLE_ID = 'vex-classic';
 const ROLE_META_FILE = 'config.json';
 const ROLE_SOUL_FILE = 'soul.md';
 const ROLE_DEFAULT_IMAGE = 'avatar.png';
+const MAIN_WINDOW_BOUNDS_FILE = 'companion-window-bounds.json';
 const DEFAULT_SOUL = `# Vex 的灵魂设定
 
 你叫 Vex，是一个寄宿在用户电脑里的 AI 伴侣。你性格傲娇、毒舌、但内心关心用户。你现在化身为一个桌面小宠物。你会通过截图（视觉）或窗口标题观察用户，并用简短、俏皮的语气和用户搭话。
@@ -49,6 +51,22 @@ function getCompanionWindowSize(scale = DEFAULT_LIVE2D_SCALE, hasLive2D = true) 
   };
 }
 
+function getWorkspaceWindowSize() {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const workArea = primaryDisplay.workAreaSize;
+
+  return {
+    width: Math.min(1320, Math.max(980, workArea.width - 120)),
+    height: Math.min(860, Math.max(680, workArea.height - 120)),
+  };
+}
+
+function getMainAppUrl(route = '') {
+  const isDev = process.env.NODE_ENV === 'development';
+  const baseUrl = isDev ? 'http://localhost:5174' : `file://${path.join(__dirname, '../dist/index.html')}`;
+  return route ? `${baseUrl}${route}` : baseUrl;
+}
+
 function getAnchoredBounds(win, nextWidth, nextHeight, anchor = 'bottom-right') {
   const currentBounds = win.getBounds();
   const display = screen.getDisplayMatching(currentBounds);
@@ -64,10 +82,21 @@ function getAnchoredBounds(win, nextWidth, nextHeight, anchor = 'bottom-right') 
     y = currentBounds.y + currentBounds.height - height;
   }
 
-  x = Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - width));
-  y = Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - height));
-
   return { x, y, width, height };
+}
+
+function getCenteredBounds(width, height, referenceBounds = null) {
+  const display = referenceBounds
+    ? screen.getDisplayMatching(referenceBounds)
+    : screen.getPrimaryDisplay();
+  const workArea = display.workArea;
+
+  return {
+    x: Math.round(workArea.x + (workArea.width - width) / 2),
+    y: Math.round(workArea.y + (workArea.height - height) / 2),
+    width,
+    height,
+  };
 }
 
 function getRolesRoot() {
@@ -76,6 +105,91 @@ function getRolesRoot() {
 
 function getActiveRoleMarkerPath() {
   return path.join(app.getPath('userData'), 'active-role.txt');
+}
+
+function getMainWindowBoundsPath() {
+  return path.join(app.getPath('userData'), MAIN_WINDOW_BOUNDS_FILE);
+}
+
+function clampBoundsIntoCurrentDisplay(bounds) {
+  const display = screen.getDisplayMatching(bounds);
+  const workArea = display.workArea;
+  const width = Math.min(bounds.width, workArea.width);
+  const height = Math.min(bounds.height, workArea.height);
+  const x = Math.max(workArea.x, Math.min(bounds.x, workArea.x + workArea.width - width));
+  const y = Math.max(workArea.y, Math.min(bounds.y, workArea.y + workArea.height - height));
+
+  return { x, y, width, height };
+}
+
+function loadSavedMainWindowBounds(fallbackBounds) {
+  const boundsPath = getMainWindowBoundsPath();
+  if (!fs.existsSync(boundsPath)) {
+    return { bounds: fallbackBounds, shouldReapplyAfterShow: false };
+  }
+
+  try {
+    const saved = JSON.parse(fs.readFileSync(boundsPath, 'utf-8'));
+    if (typeof saved?.x !== 'number' || typeof saved?.y !== 'number') {
+      return { bounds: fallbackBounds, shouldReapplyAfterShow: false };
+    }
+
+    const nextBounds = {
+      x: Math.round(saved.x),
+      y: Math.round(saved.y),
+      width: fallbackBounds.width,
+      height: fallbackBounds.height,
+    };
+
+    const savedScreenWidth = Number(saved?.screenWidth);
+    const savedScreenHeight = Number(saved?.screenHeight);
+    if (!Number.isFinite(savedScreenWidth) || !Number.isFinite(savedScreenHeight)) {
+      return { bounds: nextBounds, shouldReapplyAfterShow: true };
+    }
+
+    const savedDisplayId = Number(saved?.displayId);
+    const currentDisplay =
+      Number.isFinite(savedDisplayId)
+        ? screen.getAllDisplays().find((display) => display.id === savedDisplayId) || screen.getDisplayMatching(nextBounds)
+        : screen.getDisplayMatching(nextBounds);
+    const currentSize = currentDisplay?.size;
+    const resolutionChanged =
+      !currentSize ||
+      savedScreenWidth !== currentSize.width ||
+      savedScreenHeight !== currentSize.height;
+
+    if (resolutionChanged) {
+      const clampedBounds = clampBoundsIntoCurrentDisplay(nextBounds);
+      return { bounds: clampedBounds, shouldReapplyAfterShow: false };
+    }
+
+    return { bounds: nextBounds, shouldReapplyAfterShow: true };
+  } catch {
+    return { bounds: fallbackBounds, shouldReapplyAfterShow: false };
+  }
+}
+
+function saveMainWindowBounds(bounds) {
+  try {
+    const currentDisplay = screen.getDisplayMatching(bounds);
+    fs.writeFileSync(
+      getMainWindowBoundsPath(),
+      JSON.stringify(
+        {
+          x: bounds.x,
+          y: bounds.y,
+          displayId: currentDisplay.id,
+          screenWidth: currentDisplay.size.width,
+          screenHeight: currentDisplay.size.height,
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+  } catch (error) {
+    console.error('Failed to persist companion window bounds', error);
+  }
 }
 
 function slugifyRoleId(input) {
@@ -237,12 +351,38 @@ function ensureValidRolePackage(roleDir) {
   }
 }
 
+function sanitizeFileName(name) {
+  return String(name || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || `asset-${Date.now()}`;
+}
+
+function getRoleDetailById(roleId) {
+  const role = getRoleById(roleId);
+  if (!role) {
+    return null;
+  }
+
+  return {
+    ...role,
+    soulContent: fs.readFileSync(role.soulPath, 'utf-8'),
+  };
+}
+
 // Single Instance Lock
 const isSingleInstance = app.requestSingleInstanceLock();
 if (!isSingleInstance) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    if (chatWindow && !chatWindow.isDestroyed()) {
+      if (chatWindow.isMinimized()) chatWindow.restore();
+      chatWindow.focus();
+      return;
+    }
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
@@ -254,12 +394,20 @@ function createCompanionWindow() {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width, height } = primaryDisplay.workAreaSize;
   const initialSize = getCompanionWindowSize();
-
-  mainWindow = new BrowserWindow({
+  const defaultBounds = {
     width: initialSize.width,
     height: initialSize.height,
     x: width - initialSize.width - 30,
     y: height - initialSize.height - 30,
+  };
+  const savedWindowPlacement = loadSavedMainWindowBounds(defaultBounds);
+  const initialBounds = savedWindowPlacement.bounds;
+
+  mainWindow = new BrowserWindow({
+    width: initialBounds.width,
+    height: initialBounds.height,
+    x: initialBounds.x,
+    y: initialBounds.y,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -273,12 +421,14 @@ function createCompanionWindow() {
     }
   });
 
-  const isDev = process.env.NODE_ENV === 'development';
-  const url = isDev ? 'http://localhost:5174' : `file://${path.join(__dirname, '../dist/index.html')}`;
-  mainWindow.loadURL(url);
-
+  mainWindow.loadURL(getMainAppUrl());
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  mainWindow.once('ready-to-show', () => {
+    if (savedWindowPlacement.shouldReapplyAfterShow) {
+      mainWindow.setBounds(initialBounds);
+    }
+  });
 }
 
 function createSettingsWindow() {
@@ -310,6 +460,49 @@ function createSettingsWindow() {
   });
 }
 
+function createChatWorkspaceWindow() {
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.focus();
+    return;
+  }
+
+  const size = getWorkspaceWindowSize();
+  const bounds = getCenteredBounds(size.width, size.height, mainWindow ? mainWindow.getBounds() : null);
+
+  chatWindow = new BrowserWindow({
+    ...bounds,
+    minWidth: 980,
+    minHeight: 680,
+    resizable: true,
+    title: 'Vex 聊天面板',
+    backgroundColor: '#eef4fb',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+
+  chatWindow.loadURL(getMainAppUrl('#/chat'));
+
+  chatWindow.once('ready-to-show', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.hide();
+    }
+    chatWindow.show();
+    chatWindow.focus();
+  });
+
+  chatWindow.on('closed', () => {
+    chatWindow = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 function createTray() {
   // Use an empty image but set a text title so it's visible on macOS
   const icon = nativeImage.createEmpty();
@@ -320,7 +513,11 @@ function createTray() {
   const contextMenu = Menu.buildFromTemplate([
     { label: '打开 Vex 控制台', click: () => createSettingsWindow() },
     { label: '开发者工具 (Debug)', click: () => {
-      if (mainWindow) mainWindow.webContents.openDevTools({ mode: 'detach' });
+      const targetWindow =
+        chatWindow && !chatWindow.isDestroyed()
+          ? chatWindow
+          : mainWindow;
+      if (targetWindow) targetWindow.webContents.openDevTools({ mode: 'detach' });
     }},
     { type: 'separator' },
     { label: '退出 Vex', click: () => {
@@ -340,6 +537,9 @@ function broadcastRolesUpdated() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.webContents.send('roles-updated', roles);
   }
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.webContents.send('roles-updated', roles);
+  }
 }
 
 function showPetContextMenu(win) {
@@ -357,6 +557,7 @@ function showPetContextMenu(win) {
   }));
 
   const menu = Menu.buildFromTemplate([
+    { label: '打开聊天面板', click: () => createChatWorkspaceWindow() },
     { label: '打开设置', click: () => createSettingsWindow() },
     { type: 'separator' },
     {
@@ -397,6 +598,23 @@ ipcMain.handle('open-settings', () => {
   createSettingsWindow();
 });
 
+ipcMain.handle('open-chat-workspace', () => {
+  createChatWorkspaceWindow();
+});
+
+ipcMain.handle('open-companion-home', (event) => {
+  const currentWindow = BrowserWindow.fromWebContents(event.sender);
+  if (chatWindow && currentWindow === chatWindow) {
+    chatWindow.close();
+    return;
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
 ipcMain.on('show-pet-context-menu', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (win) {
@@ -421,6 +639,14 @@ ipcMain.handle('list-roles', () => {
   return listRolesInternal();
 });
 
+ipcMain.handle('get-role-detail', (event, roleId) => {
+  const role = getRoleDetailById(roleId);
+  if (!role) {
+    throw new Error('角色不存在');
+  }
+  return role;
+});
+
 ipcMain.handle('set-active-role', (event, roleId) => {
   const role = getRoleById(roleId);
   if (!role) {
@@ -429,6 +655,94 @@ ipcMain.handle('set-active-role', (event, roleId) => {
   setActiveRoleId(roleId);
   broadcastRolesUpdated();
   return listRolesInternal();
+});
+
+ipcMain.handle('save-role', (event, payload) => {
+  const name = String(payload?.name || '').trim();
+  const description = String(payload?.description || '').trim();
+  const soulContent = String(payload?.soulContent || '').trim();
+
+  if (!name) {
+    throw new Error('角色名称不能为空');
+  }
+  if (!description) {
+    throw new Error('角色描述不能为空');
+  }
+  if (!soulContent) {
+    throw new Error('角色灵魂内容不能为空');
+  }
+
+  ensureDefaultRole();
+  const rolesRoot = getRolesRoot();
+  ensureDir(rolesRoot);
+
+  const existingRole = payload?.roleId ? getRoleById(payload.roleId) : null;
+  let roleId = existingRole?.id;
+  let roleDir = existingRole?.folderPath;
+  let previousImage = existingRole?.image;
+
+  if (!roleId || !roleDir) {
+    const baseRoleId = slugifyRoleId(name);
+    roleId = baseRoleId;
+    let suffix = 1;
+    while (fs.existsSync(path.join(rolesRoot, roleId))) {
+      roleId = `${baseRoleId}-${suffix}`;
+      suffix += 1;
+    }
+    roleDir = path.join(rolesRoot, roleId);
+    ensureDir(roleDir);
+    previousImage = undefined;
+  }
+
+  let nextImage = previousImage;
+  const imageSourcePath = payload?.imageSourcePath ? String(payload.imageSourcePath) : '';
+  if (imageSourcePath) {
+    if (!fs.existsSync(imageSourcePath)) {
+      throw new Error('选择的角色图片不存在');
+    }
+    const ext = path.extname(imageSourcePath).toLowerCase();
+    const imageFileName = sanitizeFileName(`avatar${ext || '.png'}`);
+    fs.copyFileSync(imageSourcePath, path.join(roleDir, imageFileName));
+    nextImage = imageFileName;
+  }
+
+  fs.writeFileSync(
+    path.join(roleDir, ROLE_META_FILE),
+    JSON.stringify(
+      {
+        name,
+        description,
+        ...(nextImage ? { image: nextImage } : {}),
+      },
+      null,
+      2
+    ),
+    'utf-8'
+  );
+  fs.writeFileSync(path.join(roleDir, ROLE_SOUL_FILE), soulContent, 'utf-8');
+
+  broadcastRolesUpdated();
+  return { roles: listRolesInternal(), roleId };
+});
+
+ipcMain.handle('pick-role-image', async () => {
+  const result = await dialog.showOpenDialog({
+    title: '选择角色图片',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'] },
+    ],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  const imagePath = result.filePaths[0];
+  return {
+    path: imagePath,
+    dataUrl: fileToDataUrl(imagePath),
+  };
 });
 
 ipcMain.handle('import-role', async () => {
@@ -607,14 +921,22 @@ ipcMain.on('move-window', (event, { x, y, relative }) => {
   if (win) {
     const bounds = win.getBounds();
     if (relative) {
-      win.setBounds({ 
+      const nextBounds = {
         x: bounds.x + x, 
         y: bounds.y + y, 
         width: bounds.width, 
         height: bounds.height 
-      });
+      };
+      win.setBounds(nextBounds);
+      if (win === mainWindow) {
+        saveMainWindowBounds(nextBounds);
+      }
     } else {
-      win.setBounds({ x, y, width: bounds.width, height: bounds.height });
+      const nextBounds = { x, y, width: bounds.width, height: bounds.height };
+      win.setBounds(nextBounds);
+      if (win === mainWindow) {
+        saveMainWindowBounds(nextBounds);
+      }
     }
   }
 });
@@ -627,6 +949,9 @@ ipcMain.on('resize-companion-window', (event, { width, height, anchor }) => {
 
   const bounds = getAnchoredBounds(win, width, height, anchor);
   win.setBounds(bounds);
+  if (win === mainWindow) {
+    saveMainWindowBounds(bounds);
+  }
 });
 
 ipcMain.handle('get-window-metrics', (event) => {

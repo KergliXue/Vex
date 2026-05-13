@@ -1,12 +1,20 @@
 import { useState, useEffect } from 'react';
 import './Settings.css';
-import type { RoleInfo } from './electron';
+import type { RoleDetail, RoleInfo } from './electron';
 
 const DEFAULT_LIVE2D_MODEL_PATH = '/live2d/zzz_belle/zzz_belle.model3.json';
 const DEFAULT_CHAT_OFFSET_X = '28';
 const DEFAULT_CHAT_OFFSET_Y = '20';
 const DEFAULT_CHAT_PANEL_WIDTH = '360';
 const DEFAULT_CHAT_PANEL_HEIGHT = '520';
+const EMPTY_ROLE_FORM = {
+  roleId: '',
+  name: '',
+  description: '',
+  soulContent: '',
+  imageSourcePath: '',
+  imagePreview: '',
+};
 
 type SettingsTab = 'appearance' | 'ai' | 'advanced';
 
@@ -37,6 +45,10 @@ function Settings() {
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [roleMessage, setRoleMessage] = useState('');
   const [roleError, setRoleError] = useState('');
+  const [roleEditorOpen, setRoleEditorOpen] = useState(false);
+  const [roleEditorLoading, setRoleEditorLoading] = useState(false);
+  const [roleSaving, setRoleSaving] = useState(false);
+  const [roleForm, setRoleForm] = useState(EMPTY_ROLE_FORM);
 
   useEffect(() => {
     if (window.electronAPI) {
@@ -67,6 +79,13 @@ function Settings() {
       setRoleMessage(message);
       setRoleError('');
     }
+  };
+
+  const resetRoleEditor = () => {
+    setRoleEditorOpen(false);
+    setRoleEditorLoading(false);
+    setRoleSaving(false);
+    setRoleForm(EMPTY_ROLE_FORM);
   };
 
   const refreshRoles = async () => {
@@ -106,6 +125,75 @@ function Settings() {
       setRoleNotice('已切换当前角色，后续对话会立即使用新灵魂。');
     } catch (error) {
       setRoleNotice(error instanceof Error ? error.message : '切换角色失败', true);
+    }
+  };
+
+  const openCreateRoleEditor = () => {
+    setRoleEditorOpen(true);
+    setRoleEditorLoading(false);
+    setRoleForm({
+      ...EMPTY_ROLE_FORM,
+      soulContent: '# 新角色设定\n\n在这里写这个角色的性格、说话方式和规则。',
+    });
+    setRoleNotice('');
+  };
+
+  const openEditRoleEditor = async (roleId: string) => {
+    if (!window.electronAPI) return;
+    setRoleEditorOpen(true);
+    setRoleEditorLoading(true);
+    setRoleNotice('');
+    try {
+      const detail: RoleDetail = await window.electronAPI.getRoleDetail(roleId);
+      setRoleForm({
+        roleId: detail.id,
+        name: detail.name,
+        description: detail.description,
+        soulContent: detail.soulContent,
+        imageSourcePath: '',
+        imagePreview: detail.avatarDataUrl || '',
+      });
+    } catch (error) {
+      setRoleNotice(error instanceof Error ? error.message : '加载角色详情失败', true);
+      setRoleEditorOpen(false);
+    } finally {
+      setRoleEditorLoading(false);
+    }
+  };
+
+  const handlePickRoleImage = async () => {
+    if (!window.electronAPI) return;
+    try {
+      const result = await window.electronAPI.pickRoleImage();
+      if (!result) return;
+      setRoleForm(prev => ({
+        ...prev,
+        imageSourcePath: result.path,
+        imagePreview: result.dataUrl,
+      }));
+    } catch (error) {
+      setRoleNotice(error instanceof Error ? error.message : '选择角色图片失败', true);
+    }
+  };
+
+  const handleSaveRole = async () => {
+    if (!window.electronAPI) return;
+    setRoleSaving(true);
+    try {
+      const result = await window.electronAPI.saveRole({
+        roleId: roleForm.roleId || undefined,
+        name: roleForm.name,
+        description: roleForm.description,
+        soulContent: roleForm.soulContent,
+        imageSourcePath: roleForm.imageSourcePath || undefined,
+      });
+      setRoles(result.roles);
+      setRoleNotice(roleForm.roleId ? '角色已更新。' : '角色已创建。');
+      await openEditRoleEditor(result.roleId);
+    } catch (error) {
+      setRoleNotice(error instanceof Error ? error.message : '保存角色失败', true);
+    } finally {
+      setRoleSaving(false);
     }
   };
 
@@ -353,6 +441,9 @@ function Settings() {
                 </div>
 
                 <div className="role-toolbar">
+                  <button type="button" className="save-btn" onClick={openCreateRoleEditor}>
+                    新建角色
+                  </button>
                   <button type="button" className="save-btn secondary-btn" onClick={handleImportRole}>
                     导入角色文件夹
                   </button>
@@ -419,13 +510,20 @@ function Settings() {
                         <button
                           type="button"
                           className="save-btn ghost-btn"
+                          onClick={() => void openEditRoleEditor(role.id)}
+                        >
+                          编辑角色卡
+                        </button>
+                        <button
+                          type="button"
+                          className="save-btn ghost-btn"
                           onClick={() => {
                             if (window.electronAPI) {
                               window.electronAPI.openRoleSoulFile(role.id);
                             }
                           }}
                         >
-                          编辑灵魂
+                          外部编辑
                         </button>
                         <button
                           type="button"
@@ -446,6 +544,94 @@ function Settings() {
                     </div>
                   ))}
                 </div>
+
+                {roleEditorOpen && (
+                  <div className="role-editor-card">
+                    <div className="section-heading">
+                      <h3>{roleForm.roleId ? '编辑角色' : '新建角色'}</h3>
+                      <p>在这里直接编辑角色名称、简介、头像和 `soul.md` 内容。</p>
+                    </div>
+
+                    {roleEditorLoading ? (
+                      <div className="role-editor-loading">正在加载角色内容...</div>
+                    ) : (
+                      <>
+                        <div className="role-editor-grid">
+                          <div className="form-group">
+                            <label>角色名称</label>
+                            <input
+                              type="text"
+                              value={roleForm.name}
+                              onChange={(e) => setRoleForm(prev => ({ ...prev, name: e.target.value }))}
+                              placeholder="例如：Vex Noir"
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label>角色简介</label>
+                            <input
+                              type="text"
+                              value={roleForm.description}
+                              onChange={(e) => setRoleForm(prev => ({ ...prev, description: e.target.value }))}
+                              placeholder="一句话说明这个角色的风格与定位"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="form-group">
+                          <label>角色头像</label>
+                          <div className="role-image-row">
+                            <div className="role-editor-avatar">
+                              {roleForm.imagePreview ? (
+                                <img src={roleForm.imagePreview} alt={roleForm.name || '角色头像'} />
+                              ) : (
+                                <span>{(roleForm.name || '角').slice(0, 1)}</span>
+                              )}
+                            </div>
+                            <div className="role-image-actions">
+                              <button type="button" className="save-btn ghost-btn" onClick={handlePickRoleImage}>
+                                选择图片
+                              </button>
+                              <small className="field-hint">
+                                {roleForm.imageSourcePath || '未选择新图片时，将保留当前头像。'}
+                              </small>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="form-group">
+                          <label>灵魂设定 (`soul.md`)</label>
+                          <textarea
+                            className="role-soul-editor"
+                            value={roleForm.soulContent}
+                            onChange={(e) => setRoleForm(prev => ({ ...prev, soulContent: e.target.value }))}
+                            placeholder="在这里写角色设定、说话风格和规则"
+                            rows={14}
+                          />
+                        </div>
+
+                        <div className="role-editor-actions">
+                          <button
+                            type="button"
+                            className="save-btn ghost-btn"
+                            onClick={resetRoleEditor}
+                            disabled={roleSaving}
+                          >
+                            取消
+                          </button>
+                          <button
+                            type="button"
+                            className="save-btn"
+                            onClick={() => void handleSaveRole()}
+                            disabled={roleSaving}
+                          >
+                            {roleSaving ? '保存中...' : roleForm.roleId ? '保存角色' : '创建角色'}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="settings-section">
@@ -470,6 +656,11 @@ function Settings() {
                     onClick={() => {
                       if (window.confirm('确定要清空所有的聊天记忆吗？')) {
                         localStorage.removeItem('chat_history');
+                        localStorage.removeItem('chat_threads');
+                        localStorage.removeItem('active_chat_thread_id');
+                        localStorage.removeItem('story_messages');
+                        localStorage.removeItem('story_mode_enabled');
+                        localStorage.removeItem('story_mode_locked');
                         window.location.reload();
                       }
                     }}

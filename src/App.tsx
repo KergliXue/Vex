@@ -27,7 +27,11 @@ function App() {
     );
   }
 
-  return <Companion />;
+  if (route.includes('chat')) {
+    return <Companion mode="workspace" />;
+  }
+
+  return <Companion mode="pet" />;
 }
 
 export default App;
